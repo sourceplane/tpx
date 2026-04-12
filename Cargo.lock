@@ -259,6 +259,10 @@ dependencies = [
 [[package]]
 name = "tpx-shim"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tpx-workspace",
+]
 
 [[package]]
 name = "tpx-store"
