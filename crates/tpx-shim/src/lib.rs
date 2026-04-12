@@ -25,6 +25,21 @@ impl ShimSpec {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LazyShimSpec {
+    pub alias: String,
+    pub tool: String,
+}
+
+impl LazyShimSpec {
+    pub fn new(alias: impl Into<String>, tool: impl Into<String>) -> Self {
+        Self {
+            alias: alias.into(),
+            tool: tool.into(),
+        }
+    }
+}
+
 impl ShimManager {
     pub const fn component_name(&self) -> &'static str {
         COMPONENT_NAME
@@ -36,6 +51,16 @@ impl ShimManager {
         specs: &[ShimSpec],
     ) -> Result<Vec<PathBuf>> {
         self.write_shims(&ctx.runtime_bin_dir, specs)
+    }
+
+    pub fn write_lazy_workspace_shims(
+        &self,
+        ctx: &WorkspaceContext,
+        specs: &[LazyShimSpec],
+    ) -> Result<Vec<PathBuf>> {
+        let layout = ctx.write_lazy_layout()?;
+
+        self.write_lazy_shims(&layout.bin_dir, specs)
     }
 
     pub fn write_shims(&self, bin_dir: &Path, specs: &[ShimSpec]) -> Result<Vec<PathBuf>> {
@@ -51,6 +76,30 @@ impl ShimManager {
 
             let shim_path = bin_dir.join(&spec.alias);
             let shim_body = render_shim(&spec.target)?;
+
+            fs::write(&shim_path, shim_body)
+                .with_context(|| format!("failed to write shim {}", shim_path.display()))?;
+            set_executable(&shim_path)?;
+            written_paths.push(shim_path);
+        }
+
+        Ok(written_paths)
+    }
+
+    pub fn write_lazy_shims(&self, bin_dir: &Path, specs: &[LazyShimSpec]) -> Result<Vec<PathBuf>> {
+        recreate_directory(bin_dir)?;
+
+        let mut sorted_specs = specs.to_vec();
+        sorted_specs.sort_by(|left, right| left.alias.cmp(&right.alias));
+
+        let mut written_paths = Vec::with_capacity(sorted_specs.len());
+
+        for spec in sorted_specs {
+            validate_alias(&spec.alias)?;
+            validate_tool_name(&spec.tool)?;
+
+            let shim_path = bin_dir.join(&spec.alias);
+            let shim_body = render_lazy_shim(&spec.tool);
 
             fs::write(&shim_path, shim_body)
                 .with_context(|| format!("failed to write shim {}", shim_path.display()))?;
@@ -89,12 +138,24 @@ fn validate_alias(alias: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_tool_name(tool: &str) -> Result<()> {
+    if tool.trim().is_empty() {
+        bail!("lazy shim tool cannot be empty");
+    }
+
+    Ok(())
+}
+
 fn render_shim(target: &Path) -> Result<String> {
     let target = target
         .to_str()
         .ok_or_else(|| anyhow!("shim target {} is not valid UTF-8", target.display()))?;
 
     Ok(format!("#!/bin/sh\nexec {} \"$@\"\n", single_quote(target)))
+}
+
+fn render_lazy_shim(tool: &str) -> String {
+    format!("#!/bin/sh\nexec tpx run {} \"$@\"\n", single_quote(tool))
 }
 
 fn single_quote(value: &str) -> String {
@@ -122,7 +183,8 @@ fn set_executable(_path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use std::{
-        env, process,
+        env,
+        process::{self, Command},
         time::{SystemTime, UNIX_EPOCH},
     };
     use tpx_workspace::load_workspace;
@@ -205,6 +267,82 @@ mod tests {
     }
 
     #[test]
+    fn writes_lazy_shims_into_dot_tpx_bin_dir() {
+        let temp = temp_dir("tpx-shim-lazy-workspace");
+        let workspace_root = create_workspace(temp.path(), "demo");
+        let ctx = load_workspace(&workspace_root, Some(temp.path()))
+            .expect("workspace context should load");
+        let manager = ShimManager;
+
+        let written = manager
+            .write_lazy_workspace_shims(&ctx, &[LazyShimSpec::new("node", "node")])
+            .expect("lazy workspace shims should be written");
+        let lazy_bin_dir = ctx.root.join(".tpx/bin");
+        let lazy_env_path = ctx.root.join(".tpx/env");
+
+        assert_eq!(written, vec![lazy_bin_dir.join("node")]);
+        assert!(lazy_bin_dir.join("node").exists());
+        assert!(lazy_env_path.exists());
+        assert_eq!(
+            fs::read_to_string(lazy_bin_dir.join("node"))
+                .expect("lazy node shim should be readable"),
+            "#!/bin/sh\nexec tpx run 'node' \"$@\"\n"
+        );
+    }
+
+    #[test]
+    fn lazy_shim_dispatches_to_tpx_run() {
+        let temp = temp_dir("tpx-shim-lazy-dispatch");
+        let workspace_root = create_workspace(temp.path(), "demo");
+        let ctx = load_workspace(&workspace_root, Some(temp.path()))
+            .expect("workspace context should load");
+        let manager = ShimManager;
+        let fake_bin_dir = temp.path().join("fake-bin");
+        let capture_path = temp.path().join("capture.txt");
+
+        fs::create_dir_all(&fake_bin_dir).expect("fake bin directory should be created");
+        write_executable(
+            &fake_bin_dir.join("tpx"),
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\n",
+                single_quote(
+                    capture_path
+                        .to_str()
+                        .expect("capture path should be valid UTF-8")
+                )
+            ),
+        );
+
+        let written = manager
+            .write_lazy_workspace_shims(&ctx, &[LazyShimSpec::new("node", "node")])
+            .expect("lazy workspace shims should be written");
+        let shim_path = written
+            .first()
+            .cloned()
+            .expect("lazy shim should be created");
+        let path_env = match env::var_os("PATH") {
+            Some(existing) => format!(
+                "{}:{}",
+                fake_bin_dir.display(),
+                PathBuf::from(existing).display()
+            ),
+            None => fake_bin_dir.display().to_string(),
+        };
+        let status = Command::new(&shim_path)
+            .arg("build")
+            .arg("--json")
+            .env("PATH", path_env)
+            .status()
+            .expect("lazy shim should execute successfully");
+
+        assert_eq!(status.code(), Some(0));
+        assert_eq!(
+            fs::read_to_string(capture_path).expect("captured invocation should be readable"),
+            "run\nnode\nbuild\n--json\n"
+        );
+    }
+
+    #[test]
     fn rejects_invalid_aliases() {
         let temp = temp_dir("tpx-shim-invalid");
         let manager = ShimManager;
@@ -234,6 +372,11 @@ mod tests {
         .expect("workspace manifest should be written");
 
         fs::canonicalize(root).expect("workspace root should canonicalize")
+    }
+
+    fn write_executable(path: &Path, contents: &str) {
+        fs::write(path, contents).expect("executable should be written");
+        set_executable(path).expect("executable bit should be set");
     }
 
     fn temp_dir(prefix: &str) -> TempDir {
