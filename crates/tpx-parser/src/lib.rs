@@ -1,15 +1,20 @@
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fs, path::PathBuf};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fs,
+    path::PathBuf,
+};
 
 pub const COMPONENT_NAME: &str = "tpx-parser";
+pub const API_VERSION: &str = "tpx.io/v1";
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct InternalModel {
     pub tools: HashMap<String, Tool>,
     pub assets: HashMap<String, Asset>,
     pub envs: HashMap<String, Environment>,
-    pub providers: HashMap<String, Provider>,
+    pub providers: HashMap<String, InlineProvider>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -18,21 +23,21 @@ pub struct Metadata {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
-pub struct Provider {
+pub struct InlineProvider {
     #[serde(default)]
     pub metadata: Option<Metadata>,
     #[serde(default)]
-    pub spec: ProviderSpec,
+    pub spec: InlineProviderSpec,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
-pub struct ProviderSpec {
+pub struct InlineProviderSpec {
     #[serde(default)]
-    pub tools: Vec<ProviderTool>,
+    pub tools: Vec<InlineProviderTool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
-pub struct ProviderTool {
+pub struct InlineProviderTool {
     pub name: String,
     #[serde(default)]
     pub runtime: Option<String>,
@@ -135,15 +140,15 @@ pub struct SecretSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
-pub struct Workspace {
+pub struct LegacyWorkspace {
     #[serde(default)]
     pub metadata: Option<Metadata>,
     #[serde(default)]
-    pub spec: WorkspaceSpec,
+    pub spec: LegacyWorkspaceSpec,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
-pub struct WorkspaceSpec {
+pub struct LegacyWorkspaceSpec {
     #[serde(default)]
     pub providers: Vec<String>,
     #[serde(default)]
@@ -152,18 +157,183 @@ pub struct WorkspaceSpec {
     pub envs: Vec<String>,
 }
 
-enum Document {
-    Provider(Provider),
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct WorkspaceManifest {
+    #[serde(rename = "apiVersion")]
+    pub api_version: String,
+    pub workspace: String,
+    #[serde(default)]
+    pub metadata: Option<Metadata>,
+    #[serde(default)]
+    pub providers: BTreeMap<String, WorkspaceProviderRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "WorkspaceProviderRefValue")]
+pub struct WorkspaceProviderRef {
+    pub source: String,
+    #[serde(rename = "plainHTTP")]
+    pub plain_http: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ProviderManifest {
+    #[serde(rename = "apiVersion")]
+    pub api_version: String,
+    pub metadata: ProviderMetadata,
+    pub spec: ProviderManifestSpec,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ProviderMetadata {
+    pub namespace: String,
+    pub name: String,
+    pub version: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderRuntime {
+    Binary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ProviderManifestSpec {
+    pub runtime: ProviderRuntime,
+    pub entrypoint: String,
+    pub platforms: Vec<ProviderPlatform>,
+    #[serde(default)]
+    pub capabilities: BTreeMap<String, Capability>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub path: Vec<String>,
+    #[serde(default)]
+    pub layers: Option<ProviderLayers>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ProviderPlatform {
+    pub os: String,
+    pub arch: String,
+    pub binary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+pub struct Capability {
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+pub struct ProviderLayers {
+    #[serde(default)]
+    pub assets: Option<ProviderAssetsLayer>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ProviderAssetsLayer {
+    pub root: String,
+    #[serde(default)]
+    pub includes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct WorkspaceLock {
+    #[serde(rename = "apiVersion")]
+    pub api_version: String,
+    pub workspace: String,
+    #[serde(default)]
+    pub providers: Vec<LockedProvider>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct LockedProvider {
+    pub alias: String,
+    pub provider: String,
+    pub source: String,
+    pub version: String,
+    pub resolved: String,
+    pub store: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParsedDocument {
+    WorkspaceManifest(WorkspaceManifest),
+    ProviderManifest(ProviderManifest),
+    WorkspaceLock(WorkspaceLock),
+    InlineProvider(InlineProvider),
     Tool(Tool),
-    Bundle,
+    Bundle(Bundle),
     Asset(Asset),
     Environment(Environment),
-    Secret,
-    Workspace,
+    Secret(Secret),
+    LegacyWorkspace(LegacyWorkspace),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+enum WorkspaceProviderRefValue {
+    Shorthand(String),
+    Expanded(WorkspaceProviderRefExpanded),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct WorkspaceProviderRefExpanded {
+    source: String,
+    #[serde(default, rename = "plainHTTP")]
+    plain_http: bool,
+}
+
+impl From<WorkspaceProviderRefValue> for WorkspaceProviderRef {
+    fn from(value: WorkspaceProviderRefValue) -> Self {
+        match value {
+            WorkspaceProviderRefValue::Shorthand(source) => Self {
+                source,
+                plain_http: false,
+            },
+            WorkspaceProviderRefValue::Expanded(expanded) => Self {
+                source: expanded.source,
+                plain_http: expanded.plain_http,
+            },
+        }
+    }
+}
+
+enum Document {
+    WorkspaceManifest(WorkspaceManifest),
+    ProviderManifest(ProviderManifest),
+    WorkspaceLock(WorkspaceLock),
+    InlineProvider(InlineProvider),
+    Tool(Tool),
+    Bundle(Bundle),
+    Asset(Asset),
+    Environment(Environment),
+    Secret(Secret),
+    LegacyWorkspace(LegacyWorkspace),
+}
+
+impl From<Document> for ParsedDocument {
+    fn from(document: Document) -> Self {
+        match document {
+            Document::WorkspaceManifest(workspace) => Self::WorkspaceManifest(workspace),
+            Document::ProviderManifest(provider) => Self::ProviderManifest(provider),
+            Document::WorkspaceLock(lock) => Self::WorkspaceLock(lock),
+            Document::InlineProvider(provider) => Self::InlineProvider(provider),
+            Document::Tool(tool) => Self::Tool(tool),
+            Document::Bundle(bundle) => Self::Bundle(bundle),
+            Document::Asset(asset) => Self::Asset(asset),
+            Document::Environment(environment) => Self::Environment(environment),
+            Document::Secret(secret) => Self::Secret(secret),
+            Document::LegacyWorkspace(workspace) => Self::LegacyWorkspace(workspace),
+        }
+    }
 }
 
 impl Tool {
-    fn from_provider_tool(provider_name: &str, provider_tool: ProviderTool) -> Result<Self> {
+    fn from_provider_tool(provider_name: &str, provider_tool: InlineProviderTool) -> Result<Self> {
         let tool_name = normalized_name(&provider_tool.name, "tool")?.to_owned();
 
         Ok(Self {
@@ -181,18 +351,52 @@ impl Tool {
 }
 
 pub fn parse_file(path: &str) -> Result<InternalModel> {
-    let source = fs::read_to_string(path)
-        .with_context(|| format!("failed to read parser input at {path}"))?;
+    let source = read_source(path)?;
 
-    parse_source(&source, fallback_provider_name(path))
+    parse_legacy_source(&source, fallback_provider_name(path))
 }
 
-fn parse_source(source: &str, fallback_provider_name: String) -> Result<InternalModel> {
+pub fn parse_documents_file(path: &str) -> Result<Vec<ParsedDocument>> {
+    let source = read_source(path)?;
+
+    parse_documents_source(&source)
+}
+
+pub fn parse_document_file(path: &str) -> Result<ParsedDocument> {
+    let mut documents = parse_documents_file(path)?;
+
+    match documents.len() {
+        1 => Ok(documents.remove(0)),
+        0 => bail!("expected exactly one YAML document, found none"),
+        count => bail!("expected exactly one YAML document, found {count}"),
+    }
+}
+
+fn read_source(path: &str) -> Result<String> {
+    fs::read_to_string(path).with_context(|| format!("failed to read parser input at {path}"))
+}
+
+fn parse_legacy_source(source: &str, fallback_provider_name: String) -> Result<InternalModel> {
     if source.trim().is_empty() {
         return Ok(InternalModel::default());
     }
 
-    let documents = serde_yaml::Deserializer::from_str(source)
+    let documents = collect_documents(source)?;
+
+    normalize_documents(documents, &fallback_provider_name)
+}
+
+fn parse_documents_source(source: &str) -> Result<Vec<ParsedDocument>> {
+    if source.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    collect_documents(source)
+        .map(|documents| documents.into_iter().map(ParsedDocument::from).collect())
+}
+
+fn collect_documents(source: &str) -> Result<Vec<Document>> {
+    serde_yaml::Deserializer::from_str(source)
         .into_iter()
         .enumerate()
         .filter_map(
@@ -205,9 +409,7 @@ fn parse_source(source: &str, fallback_provider_name: String) -> Result<Internal
                 ),
             },
         )
-        .collect::<Result<Vec<_>>>()?;
-
-    normalize_documents(documents, &fallback_provider_name)
+        .collect::<Result<Vec<_>>>()
 }
 
 fn parse_document(value: serde_yaml::Value, document_index: usize) -> Result<Document> {
@@ -215,36 +417,58 @@ fn parse_document(value: serde_yaml::Value, document_index: usize) -> Result<Doc
         .get("kind")
         .and_then(serde_yaml::Value::as_str)
         .ok_or_else(|| anyhow!("document {document_index} is missing kind"))?;
+    let has_api_version = value.get("apiVersion").is_some();
 
-    match kind {
-        "Provider" => serde_yaml::from_value(value)
-            .map(Document::Provider)
+    match (kind, has_api_version) {
+        ("Provider", true) => serde_yaml::from_value(value)
+            .map_err(anyhow::Error::from)
+            .and_then(validate_provider_manifest)
+            .map(Document::ProviderManifest)
             .with_context(|| {
-                format!("failed to deserialize Provider in document {document_index}")
+                format!("failed to deserialize canonical Provider in document {document_index}")
             }),
-        "Tool" => serde_yaml::from_value(value)
+        ("Provider", false) => serde_yaml::from_value(value)
+            .map(Document::InlineProvider)
+            .with_context(|| {
+                format!("failed to deserialize inline Provider in document {document_index}")
+            }),
+        ("Workspace", true) => serde_yaml::from_value(value)
+            .map_err(anyhow::Error::from)
+            .and_then(validate_workspace_manifest)
+            .map(Document::WorkspaceManifest)
+            .with_context(|| {
+                format!("failed to deserialize canonical Workspace in document {document_index}")
+            }),
+        ("Workspace", false) => serde_yaml::from_value(value)
+            .map(Document::LegacyWorkspace)
+            .with_context(|| {
+                format!("failed to deserialize legacy Workspace in document {document_index}")
+            }),
+        ("WorkspaceLock", _) => serde_yaml::from_value(value)
+            .map_err(anyhow::Error::from)
+            .and_then(validate_workspace_lock)
+            .map(Document::WorkspaceLock)
+            .with_context(|| {
+                format!("failed to deserialize WorkspaceLock in document {document_index}")
+            }),
+        ("Tool", _) => serde_yaml::from_value(value)
             .map(Document::Tool)
             .with_context(|| format!("failed to deserialize Tool in document {document_index}")),
-        "Bundle" => serde_yaml::from_value::<Bundle>(value)
-            .map(|_| Document::Bundle)
+        ("Bundle", _) => serde_yaml::from_value(value)
+            .map(Document::Bundle)
             .with_context(|| format!("failed to deserialize Bundle in document {document_index}")),
-        "Asset" => serde_yaml::from_value(value)
+        ("Asset", _) => serde_yaml::from_value(value)
             .map(Document::Asset)
             .with_context(|| format!("failed to deserialize Asset in document {document_index}")),
-        "Environment" => serde_yaml::from_value(value)
+        ("Environment", _) => serde_yaml::from_value(value)
             .map(Document::Environment)
             .with_context(|| {
                 format!("failed to deserialize Environment in document {document_index}")
             }),
-        "Secret" => serde_yaml::from_value::<Secret>(value)
-            .map(|_| Document::Secret)
+        ("Secret", _) => serde_yaml::from_value(value)
+            .map(Document::Secret)
             .with_context(|| format!("failed to deserialize Secret in document {document_index}")),
-        "Workspace" => serde_yaml::from_value::<Workspace>(value)
-            .map(|_| Document::Workspace)
-            .with_context(|| {
-                format!("failed to deserialize Workspace in document {document_index}")
-            }),
-        other => bail!("unsupported kind '{other}' in document {document_index}"),
+        (other, _) => bail!("unsupported kind '{other}' in document {document_index}"),
     }
 }
 
@@ -256,7 +480,7 @@ fn normalize_documents(
 
     for document in documents {
         match document {
-            Document::Provider(mut provider) => {
+            Document::InlineProvider(mut provider) => {
                 let provider_name =
                     normalize_provider_name(provider.metadata.take(), fallback_provider_name)?;
                 provider.metadata = Some(Metadata {
@@ -297,11 +521,98 @@ fn normalize_documents(
 
                 insert_unique(&mut model.envs, env_name, environment, "environment")?;
             }
-            Document::Bundle | Document::Secret | Document::Workspace => {}
+            Document::ProviderManifest(_)
+            | Document::WorkspaceManifest(_)
+            | Document::WorkspaceLock(_)
+            | Document::Bundle(_)
+            | Document::Secret(_)
+            | Document::LegacyWorkspace(_) => {}
         }
     }
 
     Ok(model)
+}
+
+fn validate_workspace_manifest(manifest: WorkspaceManifest) -> Result<WorkspaceManifest> {
+    validate_api_version(&manifest.api_version, "workspace manifest")?;
+    normalized_name(&manifest.workspace, "workspace")?;
+
+    for (alias, provider_ref) in &manifest.providers {
+        normalized_name(alias, "provider alias")?;
+        normalized_name(&provider_ref.source, "provider source")?;
+    }
+
+    Ok(manifest)
+}
+
+fn validate_provider_manifest(manifest: ProviderManifest) -> Result<ProviderManifest> {
+    validate_api_version(&manifest.api_version, "provider manifest")?;
+    normalized_name(&manifest.metadata.namespace, "provider namespace")?;
+    normalized_name(&manifest.metadata.name, "provider name")?;
+    normalized_name(&manifest.metadata.version, "provider version")?;
+    normalized_name(&manifest.spec.entrypoint, "provider entrypoint")?;
+
+    if manifest.spec.platforms.is_empty() {
+        bail!("provider manifest must declare at least one platform");
+    }
+
+    for platform in &manifest.spec.platforms {
+        normalized_name(&platform.os, "platform os")?;
+        normalized_name(&platform.arch, "platform arch")?;
+        normalized_name(&platform.binary, "platform binary")?;
+    }
+
+    for capability_name in manifest.spec.capabilities.keys() {
+        normalized_name(capability_name, "capability name")?;
+    }
+
+    for (env_key, env_value) in &manifest.spec.env {
+        normalized_name(env_key, "provider env key")?;
+        if env_key.starts_with("TPX_") {
+            bail!("provider env key '{env_key}' uses reserved TPX_ prefix");
+        }
+        normalized_name(env_value, "provider env value")?;
+    }
+
+    for path_entry in &manifest.spec.path {
+        normalized_name(path_entry, "provider path entry")?;
+    }
+
+    if let Some(layers) = &manifest.spec.layers {
+        if let Some(assets) = &layers.assets {
+            normalized_name(&assets.root, "assets root")?;
+
+            for include in &assets.includes {
+                normalized_name(include, "asset include pattern")?;
+            }
+        }
+    }
+
+    Ok(manifest)
+}
+
+fn validate_workspace_lock(lock: WorkspaceLock) -> Result<WorkspaceLock> {
+    validate_api_version(&lock.api_version, "workspace lock")?;
+    normalized_name(&lock.workspace, "workspace lock name")?;
+
+    for provider in &lock.providers {
+        normalized_name(&provider.alias, "locked provider alias")?;
+        normalized_name(&provider.provider, "locked provider name")?;
+        normalized_name(&provider.source, "locked provider source")?;
+        normalized_name(&provider.version, "locked provider version")?;
+        normalized_name(&provider.resolved, "locked provider resolved ref")?;
+        normalized_name(&provider.store, "locked provider store id")?;
+    }
+
+    Ok(lock)
+}
+
+fn validate_api_version(api_version: &str, kind: &str) -> Result<()> {
+    if api_version.trim() != API_VERSION {
+        bail!("{kind} apiVersion must be {API_VERSION}");
+    }
+
+    Ok(())
 }
 
 fn fallback_provider_name(path: &str) -> String {
@@ -497,6 +808,217 @@ spec:
             .expect_err("duplicate tool names should fail");
 
         assert!(error.to_string().contains("duplicate tool 'kubectl'"));
+
+        remove_fixture(&path);
+    }
+
+    #[test]
+    fn parses_workspace_manifest_with_provider_refs() {
+        let path = write_fixture(
+            "workspace-manifest",
+            r#"apiVersion: tpx.io/v1
+kind: Workspace
+workspace: dev
+metadata:
+  name: Developer Workspace
+providers:
+  node: core/node
+  kubectl:
+    source: ghcr.io/acme/kubectl:v1.31.0
+    plainHTTP: true
+"#,
+        );
+
+        let document =
+            parse_document_file(path.to_str().expect("fixture path should be valid UTF-8"))
+                .expect("workspace manifest should parse");
+
+        match document {
+            ParsedDocument::WorkspaceManifest(workspace) => {
+                assert_eq!(workspace.api_version, API_VERSION);
+                assert_eq!(workspace.workspace, "dev");
+                assert_eq!(
+                    workspace
+                        .metadata
+                        .as_ref()
+                        .map(|metadata| metadata.name.as_str()),
+                    Some("Developer Workspace")
+                );
+                assert_eq!(workspace.providers.len(), 2);
+                assert_eq!(
+                    workspace
+                        .providers
+                        .get("node")
+                        .map(|provider| provider.source.as_str()),
+                    Some("core/node")
+                );
+                assert_eq!(
+                    workspace
+                        .providers
+                        .get("node")
+                        .map(|provider| provider.plain_http),
+                    Some(false)
+                );
+                assert_eq!(
+                    workspace
+                        .providers
+                        .get("kubectl")
+                        .map(|provider| provider.source.as_str()),
+                    Some("ghcr.io/acme/kubectl:v1.31.0")
+                );
+                assert_eq!(
+                    workspace
+                        .providers
+                        .get("kubectl")
+                        .map(|provider| provider.plain_http),
+                    Some(true)
+                );
+            }
+            other => panic!("expected WorkspaceManifest, got {other:?}"),
+        }
+
+        remove_fixture(&path);
+    }
+
+    #[test]
+    fn parses_provider_manifest_with_platforms_and_assets() {
+        let path = write_fixture(
+            "provider-manifest",
+            r#"apiVersion: tpx.io/v1
+kind: Provider
+metadata:
+  namespace: acme
+  name: node
+  version: v20.19.0
+  description: Node.js runtime provider
+spec:
+  runtime: binary
+  entrypoint: node
+  platforms:
+    - os: darwin
+      arch: arm64
+      binary: bin/darwin/arm64/node
+    - os: linux
+      arch: amd64
+      binary: bin/linux/amd64/node
+  capabilities:
+    build:
+      description: Compile the application
+  env:
+    NODE_EXTRA_CA_CERTS: ${provider_assets}/certs/root-ca.pem
+  path:
+    - tools/bin
+  layers:
+    assets:
+      root: assets
+      includes:
+        - certs/*.pem
+"#,
+        );
+
+        let document =
+            parse_document_file(path.to_str().expect("fixture path should be valid UTF-8"))
+                .expect("provider manifest should parse");
+
+        match document {
+            ParsedDocument::ProviderManifest(provider) => {
+                assert_eq!(provider.api_version, API_VERSION);
+                assert_eq!(provider.metadata.namespace, "acme");
+                assert_eq!(provider.metadata.name, "node");
+                assert_eq!(provider.metadata.version, "v20.19.0");
+                assert_eq!(provider.spec.runtime, ProviderRuntime::Binary);
+                assert_eq!(provider.spec.entrypoint, "node");
+                assert_eq!(provider.spec.platforms.len(), 2);
+                assert_eq!(provider.spec.platforms[0].os, "darwin");
+                assert_eq!(provider.spec.platforms[1].arch, "amd64");
+                assert_eq!(
+                    provider
+                        .spec
+                        .capabilities
+                        .get("build")
+                        .and_then(|capability| capability.description.as_deref()),
+                    Some("Compile the application")
+                );
+                assert_eq!(
+                    provider
+                        .spec
+                        .env
+                        .get("NODE_EXTRA_CA_CERTS")
+                        .map(String::as_str),
+                    Some("${provider_assets}/certs/root-ca.pem")
+                );
+                assert_eq!(provider.spec.path, vec!["tools/bin"]);
+                assert_eq!(
+                    provider
+                        .spec
+                        .layers
+                        .as_ref()
+                        .and_then(|layers| layers.assets.as_ref())
+                        .map(|assets| assets.root.as_str()),
+                    Some("assets")
+                );
+            }
+            other => panic!("expected ProviderManifest, got {other:?}"),
+        }
+
+        remove_fixture(&path);
+    }
+
+    #[test]
+    fn parses_workspace_lock_document() {
+        let path = write_fixture(
+            "workspace-lock",
+            r#"apiVersion: tpx.io/v1
+kind: WorkspaceLock
+workspace: dev
+providers:
+  - alias: node
+    provider: core/node
+    source: core/node
+    version: v20.19.0
+    resolved: ghcr.io/acme/node-provider@sha256:1234
+    store: abc123
+"#,
+        );
+
+        let document =
+            parse_document_file(path.to_str().expect("fixture path should be valid UTF-8"))
+                .expect("workspace lock should parse");
+
+        match document {
+            ParsedDocument::WorkspaceLock(lock) => {
+                assert_eq!(lock.api_version, API_VERSION);
+                assert_eq!(lock.workspace, "dev");
+                assert_eq!(lock.providers.len(), 1);
+                assert_eq!(lock.providers[0].alias, "node");
+                assert_eq!(
+                    lock.providers[0].resolved,
+                    "ghcr.io/acme/node-provider@sha256:1234"
+                );
+            }
+            other => panic!("expected WorkspaceLock, got {other:?}"),
+        }
+
+        remove_fixture(&path);
+    }
+
+    #[test]
+    fn fails_on_invalid_api_version() {
+        let path = write_fixture(
+            "invalid-api-version",
+            r#"apiVersion: tinx.io/v1
+kind: Workspace
+workspace: dev
+providers:
+  node: core/node
+"#,
+        );
+
+        let error = parse_document_file(path.to_str().expect("fixture path should be valid UTF-8"))
+            .expect_err("invalid apiVersion should fail");
+        let error_message = format!("{error:#}");
+
+        assert!(error_message.contains("apiVersion must be tpx.io/v1"));
 
         remove_fixture(&path);
     }
