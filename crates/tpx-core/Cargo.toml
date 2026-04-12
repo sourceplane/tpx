@@ -6,3 +6,6 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+anyhow = "1"
+petgraph = "0.6"
+tpx-parser = { path = "../tpx-parser" }
