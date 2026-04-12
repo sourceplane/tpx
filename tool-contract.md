@@ -1,463 +1,549 @@
-# 🚀 Tpx v2 — Full Implementation Contract (From Scratch)
+# TPX v2 - Tinx Parity Contract
 
-## 🎯 Goal
+## Goal
 
-Implement tpx as a **modular runtime orchestration engine** with:
+Implement TPX as a Rust reimplementation of tinx.
 
-* OCI-native distribution
-* Lazy execution model
-* Pluggable runtimes
-* Deterministic dependency graph
-* Single-file authoring + multi-kind support
+The system must be:
 
----
+- workspace-first
+- OCI-native
+- lazy in runtime materialization
+- deterministic in locking and shell construction
+- simple in execution: binaries on `PATH`, no RPC, no plugin protocol
 
-# 🧱 MODULE ARCHITECTURE
+This contract intentionally moves TPX away from a generic orchestration engine and toward a faithful tinx-style provider runtime.
 
-```
-tpx/
- ├── cli/            # CLI entrypoints
- ├── parser/         # YAML → AST → Internal Model
- ├── core/           # resolver + graph engine
- ├── runtime/        # runtime interfaces + registry
- ├── runtimes/       # runtime implementations
- ├── store/          # OCI-like content store
- ├── shim/           # lazy execution layer
- ├── workspace/      # workspace management
- └── config/         # global config (tpx home)
-```
+## Design Principles
 
----
+### Workspace-first execution
 
-# 1️⃣ CLI MODULE
+- All execution flows through a workspace.
+- Canonical execution is `tpx exec`, `tpx shell`, or `tpx -- <command>`.
+- `tpx run` is deprecated compatibility only.
 
-## Responsibilities
+### OCI-native provider model
 
-* Command parsing
-* User interaction
-* Delegation to core engine
+- Providers are OCI artifacts.
+- Local OCI layouts and remote registries are both first-class sources.
+- Provider metadata, OCI content, and materialized binaries are separate states.
 
-## Commands (MUST IMPLEMENT)
+### Deterministic runtime shell
+
+- Runtime output is generated into `.workspace/`.
+- Alias ordering is deterministic.
+- Environment conflicts fail fast.
+- Workspace aliases override host binaries through `PATH` ordering.
+
+### Lazy materialization
+
+- Metadata install must work without extracting binaries.
+- Binary extraction happens only when required by runtime execution.
+- Missing blobs may be restored by remote hydration if metadata is already available.
+
+## Canonical Concepts
 
 ### Workspace
 
+- The unit of execution.
+- Defines aliases, provider sources, and the desired tool environment.
+
+### Provider
+
+- The unit of distribution.
+- A versioned OCI artifact that packages one binary entrypoint plus optional assets and metadata.
+
+### Alias
+
+- The command name a workspace exposes on `PATH`.
+- Aliases map workspace intent to provider sources.
+
+### Runtime shell
+
+- The generated shell environment that resolves aliases, builds `PATH`, exports env, and launches commands.
+
+### TPX home
+
+- Shared global cache and state root.
+- Equivalent of tinx home.
+
+## Canonical Files and Directories
+
+### Workspace root
+
+```text
+<workspace>/
+  tpx.yaml
+  tpx.lock
+  .workspace/
+    env
+    path
+    bin/
+      <alias>
+```
+
+### TPX home
+
+```text
+$TPX_HOME/
+  config.yaml
+  providers/
+    <namespace>/<name>/<version>/
+  store/
+    <storeID>/
+      oci/
+      bin/<os>/<arch>/<entrypoint>
+      assets/
+```
+
+### Path rules
+
+- Default home is `~/.tpx`.
+- `--tpx-home` overrides `TPX_HOME`.
+- `.workspace/` is generated output, not source of truth.
+
+## Module Architecture
+
+```text
+tpx/
+  crates/
+    tpx-cli          # root CLI, workspace targeting, command passthrough
+    tpx-parser       # manifests, lock file, config parsing and validation
+    tpx-core         # workspace sync and shell planning
+    tpx-runtime      # binary runtime shell execution
+    tpx-store        # provider metadata store, OCI layout store, materialization
+    tpx-shim         # shim generation and exec wrappers
+    tpx-workspace    # workspace discovery, active workspace, runtime state build
+    runtimes/        # internal execution/materialization drivers only if needed
+```
+
+Important note:
+
+- `tpx-runtime` is not a public plugin framework in the tinx sense.
+- The primary public provider runtime is `binary`.
+- Any extra runtimes are internal implementation details until parity is complete.
+
+## CLI Contract
+
+### Root commands required for parity
+
 ```bash
 tpx init
-tpx workspace list
-tpx workspace use <name>
+tpx install
+tpx exec <command> [args...]
+tpx shell
+tpx status
+tpx pack
+tpx release
+tpx version
+tpx workspace <subcommand>
+tpx provider <subcommand>
+tpx use <workspace>
+tpx add <provider> [as <alias>]
+tpx remove <provider-or-alias>
+tpx update [provider-or-alias...]
+tpx list
+tpx -- <command> [args...]
 ```
 
-### Providers
+### `tpx run`
 
 ```bash
-tpx provider add <name>@<version>
-tpx provider list
-tpx provider remove <name>
+tpx run <provider-or-alias> [args...]
 ```
 
-### Tools
+Required behavior:
+
+- Keep only as deprecated compatibility.
+- Return guidance toward `tpx exec` or `tpx -- ...`.
+- Do not make it the main execution model.
+
+### Workspace commands
 
 ```bash
-tpx run <tool> [args...]
-tpx exec <tool> [args...]   # alias
-tpx tools list
-tpx tools inspect <tool>
+tpx workspace create [path|manifest]
+tpx workspace list [--active|--ready|--missing|--short]
+tpx workspace current
+tpx workspace use <workspace> [-- command...]
+tpx workspace delete <workspace>
 ```
 
-### Runtime
+### Provider commands
 
 ```bash
-tpx runtime list
-tpx runtime inspect <name>
+tpx provider add <provider> [as <alias>]
+tpx provider list [workspace|default]
+tpx provider remove <provider-or-alias>
+tpx provider update [provider-or-alias...]
 ```
 
-### Cache
+### Install and packaging commands
 
 ```bash
-tpx cache list
-tpx cache clean
+tpx install <ref> [as <alias>]
+tpx pack --manifest tpx.yaml
+tpx release --manifest tpx.yaml [--push <ref>]
 ```
 
----
+### Global flags
 
-## CLI → Core Binding
-
-```ts
-core.run(toolName, args, workspaceCtx)
-core.installProvider(name, version)
-core.listTools()
+```bash
+--tpx-home <path>
+--workspace, -w <workspace>
+--version
 ```
 
----
+## Parser Module
 
-# 2️⃣ PARSER MODULE
+### Responsibilities
 
-## Responsibilities
+- Parse typed YAML documents.
+- Validate workspace, provider, and lock schemas.
+- Normalize alias and provider references.
+- Preserve deterministic ordering where possible.
 
-* Parse YAML (single or multi-doc)
-* Validate schema
-* Normalize into internal model
+### Canonical documents
 
----
-
-## Input Supported
-
-### Mode 1: Inline
+#### Workspace manifest
 
 ```yaml
+apiVersion: tpx.io/v1
+kind: Workspace
+workspace: dev
+providers:
+  node:
+    source: core/node
+  kubectl:
+    source: ghcr.io/acme/kubectl:v1.31.0
+    plainHTTP: false
+```
+
+#### Provider manifest
+
+```yaml
+apiVersion: tpx.io/v1
 kind: Provider
+metadata:
+  namespace: acme
+  name: node
+  version: v20.19.0
 spec:
-  tools:
-    - name: kubectl
+  runtime: binary
+  entrypoint: node
+  platforms:
+    - os: linux
+      arch: amd64
+      binary: bin/linux/amd64/node
+  capabilities:
+    build:
+      description: Compile the application
+  env:
+    WORKSPACE_ROOT: ${workspace_root}
+  path:
+    - tools/bin
+  layers:
+    assets:
+      root: assets
 ```
 
-### Mode 2: Multi-Kind
+#### Lock file
 
 ```yaml
----
-kind: Tool
-metadata:
-  name: kubectl
+apiVersion: tpx.io/v1
+kind: WorkspaceLock
+workspace: dev
+providers:
+  - alias: node
+    provider: core/node
+    source: core/node
+    version: v20.19.0
+    resolved: ghcr.io/acme/node-provider@sha256:...
+    store: 4f3f...
 ```
 
----
+### Internal model guidance
 
-## Output (STRICT)
+TPX should not treat generic `Tool` objects as the primary external model.
 
-```ts
-type InternalModel = {
-  tools: Map<string, Tool>
-  assets: Map<string, Asset>
-  envs: Map<string, Environment>
-  providers: Map<string, Provider>
+Preferred internal model:
+
+```rust
+pub enum ParsedDocument {
+    Workspace(WorkspaceManifest),
+    Provider(ProviderManifest),
+    WorkspaceLock(WorkspaceLock),
 }
 ```
 
----
+If a generic `Tool` abstraction remains, it must represent a workspace alias ready for execution, not the user-facing manifest model.
 
-## Binding
+### Current parser extension mode
 
-```ts
-parser.parse(filePath) → InternalModel
+Multi-kind and inline authoring can remain as an extension, but parity work must prioritize:
+
+- `Workspace`
+- `Provider`
+- `WorkspaceLock`
+
+## Workspace Module
+
+### Responsibilities
+
+- Resolve which workspace is active.
+- Load and normalize manifest plus lock.
+- Register and unregister known workspaces.
+- Build `.workspace/` runtime state.
+
+### Workspace resolution order
+
+1. explicit `--workspace`
+2. upward discovery from current working directory
+3. active workspace from `$TPX_HOME/config.yaml`
+
+### Runtime build outputs
+
+- `.workspace/env`
+- `.workspace/path`
+- `.workspace/bin/<alias>`
+
+### Required behaviors
+
+- recreate `.workspace/bin` on each build
+- sort aliases before writing shell artifacts
+- preserve cwd if invocation happens inside the workspace tree
+- otherwise execute from the workspace root
+- mark stale registered workspaces as missing when paths disappear
+
+## Core Module
+
+### Responsibilities
+
+- orchestrate workspace sync
+- resolve provider aliases to exact locked refs
+- detect environment conflicts
+- plan shell build and command execution
+- expose deterministic execution plan APIs
+
+### Core API direction
+
+```rust
+pub fn sync_workspace(ctx: &WorkspaceContext) -> Result<WorkspaceLock>
+pub fn build_shell(ctx: &WorkspaceContext) -> Result<ShellPlan>
+pub fn exec(command: &str, args: &[String], ctx: &WorkspaceContext) -> Result<i32>
 ```
 
----
+### Important constraint
 
-# 3️⃣ CORE MODULE (Resolver Engine)
+The core module is not primarily a provider DAG resolver.
 
-## Responsibilities
+- Provider dependencies are not the main tinx abstraction.
+- A graph planner may exist for future workflow features.
+- It must not replace workspace alias resolution, lock generation, or shell planning.
 
-* Graph building (DAG)
-* Dependency resolution
-* Runtime selection
-* Execution orchestration
+### Execution plan
 
----
-
-## Core API
-
-```ts
-run(toolName: string, args: string[], ctx: Context): int
-
-resolveTool(name: string): Tool
-
-resolveDependencies(tool: Tool): Tool[]
-
-buildExecutionPlan(tool: Tool): ExecutionPlan
-```
-
----
-
-## Execution Flow (STRICT)
-
-```
-run()
-  → resolveTool()
-  → resolveDependencies()
-  → selectRuntime()
-  → runtime.resolve()
-  → runtime.isInstalled()
-  → runtime.install() (if needed)
-  → runtime.execute()
-```
-
----
-
-## Dependency Rules
-
-* DAG only (no cycles)
-* Tool-level dependencies
-* Provider-level dependencies
-* Parallel resolution allowed
-
----
-
-# 4️⃣ RUNTIME MODULE (INTERFACE)
-
-## Runtime Interface
-
-```ts
-interface Runtime {
-  name(): string
-
-  resolve(tool: Tool, ctx: Context): ResolvedTool
-
-  install(resolved: ResolvedTool, ctx: Context): void
-
-  execute(resolved: ResolvedTool, args: string[], ctx: Context): int
-
-  isInstalled(resolved: ResolvedTool, ctx: Context): boolean
+```rust
+pub struct ShellPlan {
+    pub workspace_root: PathBuf,
+    pub env_file: PathBuf,
+    pub path_file: PathBuf,
+    pub aliases: Vec<AliasPlan>,
+    pub env: BTreeMap<String, String>,
+    pub path_entries: Vec<PathBuf>,
 }
 ```
 
----
+## Runtime Module
 
-## Runtime Registry
+### Responsibilities
 
-```ts
-register(runtime: Runtime)
-get(name: string): Runtime
-list(): Runtime[]
+- materialize current platform binary when missing
+- assemble environment and `PATH`
+- resolve alias from generated `PATH`
+- `exec` the final child process
+
+### Runtime model
+
+Public provider runtime support for parity:
+
+- `binary`
+
+Internal source/materialization drivers may exist for:
+
+- local OCI layout
+- remote OCI registry
+
+But these are not a public plugin framework.
+
+### Runtime-generated environment variables
+
+```text
+TPX_HOME
+TPX_WORKSPACE_ROOT
+TPX_WORKSPACE_HOME
+TPX_WORKSPACE_ENV_FILE
+TPX_WORKSPACE_PATH_FILE
+TPX_WORKSPACE_PROVIDERS
+TPX_PROVIDER_<ALIAS>_REF
+TPX_PROVIDER_<ALIAS>_HOME
+TPX_PROVIDER_<ALIAS>_BINARY
 ```
 
----
+### Template variables supported in provider manifests
 
-## Binding
-
-```ts
-runtime = registry.get(tool.runtime.type)
+```text
+${cwd}
+${workspace_root}
+${workspace_home}
+${provider_alias}
+${provider_ref}
+${provider_namespace}
+${provider_name}
+${provider_version}
+${provider_home}
+${provider_root}
+${provider_binary}
+${provider_assets}
 ```
 
----
+Unknown template variables should remain unchanged.
 
-# 5️⃣ RUNTIMES MODULE (PLUGINS)
+## Store Module
 
-## Required Built-in Runtimes
+### Responsibilities
 
-### 1. local
+- store provider metadata
+- store OCI layouts
+- materialize binaries and assets lazily
+- support remote hydration for partial cache states
 
-* Executes binary from cache
-* No install step
+### Required layout
 
----
-
-### 2. script
-
-* Executes script
-* Produces tool artifact
-* Uses cache key
-
----
-
-### 3. oci
-
-* Pulls from OCI
-* Extracts correct platform layer
-* Stores in content store
-
----
-
-## Future (Design for extension)
-
-* deno
-* wasm
-* container
-
----
-
-# 6️⃣ STORE MODULE (OCI-LIKE)
-
-## Responsibilities
-
-* Content-addressable storage
-* Deduplication
-* Layer management
-
----
-
-## Structure
-
-```
-  ~/.tpx/
-  store/
-    blobs/<sha256>
-    index/
+```text
+$TPX_HOME/providers/<namespace>/<name>/<version>/
+$TPX_HOME/store/<storeID>/oci/
+$TPX_HOME/store/<storeID>/bin/<os>/<arch>/<entrypoint>
+$TPX_HOME/store/<storeID>/assets/
 ```
 
----
+### Required rules
 
-## API
+- `storeID` must be deterministic from provider identity plus manifest digest
+- local OCI install must validate requested identity against actual layout content
+- metadata-only install is valid
+- remote hydration must recover missing blobs without discarding metadata
 
-```ts
-store.put(blob) → digest
-store.get(digest) → blob
-store.exists(digest) → bool
-```
+## Shim Module
 
----
+### Responsibilities
 
-## Requirements
+- create workspace alias shims under `.workspace/bin`
+- forward execution to the materialized binary
+- preserve exit code, signals, and process behavior
 
-* SHA256-based
-* platform-aware
-* partial fetch support
+### Requirement
 
----
+Shims must `exec` the real binary rather than spawn nested shells where possible.
 
-# 7️⃣ SHIM MODULE
+## Packaging and Release Module
 
-## Responsibilities
+### Responsibilities
 
-* Lazy execution trigger
-* Transparent user experience
+- build binaries for each declared platform
+- validate declared binary paths exist
+- assemble OCI image layout deterministically
+- optionally push provider artifact to registry
 
----
-
-## Behavior
-
-When user runs:
+### Required commands
 
 ```bash
-kubectl get pods
+tpx pack --manifest tpx.yaml
+tpx release --manifest tpx.yaml [--push <ref>]
 ```
 
-Shim:
+### Packaging pipeline
 
-```
-if not installed:
-  tpx core run kubectl
-else:
-  execute binary
-```
+1. build every declared platform
+2. create provider metadata config
+3. add binary and asset layers
+4. write OCI image layout
+5. optionally push through OCI registry APIs
 
----
+## Execution Contract
 
-## Shim Generation
+## `tpx -- node build`
 
-```ts
-shim.create(toolName, path)
-```
+1. CLI resolves workspace target
+2. workspace module loads `tpx.yaml` and `tpx.lock`
+3. core syncs provider metadata and rewrites lock if needed
+4. store ensures OCI layout is available
+5. runtime materializes the current platform binary lazily
+6. workspace module writes `.workspace/env`, `.workspace/path`, and `.workspace/bin/node`
+7. runtime prepends `.workspace/bin` and provider path entries to `PATH`
+8. runtime resolves `node` from the generated `PATH`
+9. runtime `exec`s the real provider binary with merged env
 
----
+## Caching Rules
 
-## Requirements
+- metadata cache and binary cache are distinct
+- no eager binary extraction during sync-only flows
+- identical provider ref plus manifest digest must reuse store state
+- local OCI layouts are reused as local sources and are not rehydrated from remote
 
-* Must be fast
-* Must not re-install repeatedly
-* Must be OS compatible
+## Error Handling
 
----
+- no workspace selected and none discoverable -> fail
+- selected workspace path missing -> fail
+- provider source mismatch with local OCI layout -> fail
+- requested platform binary missing -> fail
+- provider env conflict -> fail
+- requested command absent from constructed `PATH` -> fail
+- unresolved remote hydration -> fail
 
-# 8️⃣ WORKSPACE MODULE
+## Security Baseline
 
-## Responsibilities
+- default to HTTPS registry access
+- allow plain HTTP only per provider source
+- reserve `TPX_` prefix for runtime-generated variables
+- verify provider identity when installing from local OCI layouts
+- plan checksum and signature verification as future hardening stages
 
-* Workspace lifecycle
-* Tool exposure
-* Environment setup
+## CI and Deployment Contract
 
----
+- support explicit `TPX_HOME` for deterministic CI caches
+- cache `providers/` and `store/` between CI jobs
+- support env-based registry authentication
+- prefer `tpx exec` and `tpx -- ...` in CI
+- use `tpx shell` only for interactive local workflows
 
-## Structure
+## Required Changes to the Current Code Direction
 
-```
-workspace/
-  tpx.yaml
-  .tpx/
-    bin/      # shims
-    env       # exported env
-```
+### 1. Parser
 
----
+- Add canonical `Workspace`, `Provider`, and `WorkspaceLock` models.
+- Support shorthand and expanded provider refs.
+- Treat current generic `Tool` parsing as secondary.
 
-## API
+### 2. Core
 
-```ts
-workspace.load(path)
-workspace.installProvider()
-workspace.linkTool()
-```
+- Do not let the current DAG resolver become the main workspace engine.
+- Refocus core on workspace sync, lock generation, shell build, env conflict detection, and command lookup.
 
----
+### 3. Runtime
 
----
+- Narrow the public runtime contract to `binary` first.
+- Reclassify local/OCI behaviors as source/materialization paths rather than end-user runtime types.
 
-# 🔗 MODULE BINDINGS (CRITICAL)
+### 4. Workspace state
 
-| From             | To                | Contract |
-| ---------------- | ----------------- | -------- |
-| CLI → Core       | run(), install()  |          |
-| Core → Runtime   | Runtime interface |          |
-| Core → Parser    | InternalModel     |          |
-| Runtime → Store  | get/put blobs     |          |
-| Shim → Core      | run()             |          |
-| Workspace → Core | context           |          |
+- Prefer `.workspace/` over `.tpx/` for runtime artifacts.
+- Add active workspace tracking and missing-workspace handling.
 
----
+### 5. CLI
 
-# ⚡ EXECUTION CONTRACT (END-TO-END)
+- Add `status`, `shell`, `install`, `pack`, `release`, `workspace current`, `workspace delete`, and `provider update`.
+- Deprecate `run` once `exec` and `tpx -- ...` are stable.
 
-## tpx run kubectl
+## Final System Definition
 
-1. CLI → core.run("kubectl")
-2. core:
-
-   * resolve tool
-   * resolve dependencies
-   * select runtime
-3. runtime:
-
-   * resolve()
-   * isInstalled()
-   * install() if needed
-   * execute()
-4. store used for caching
-5. shim updated
-
----
-
-# 🧠 CACHING RULES
-
-* Cache key MUST be deterministic
-* Based on:
-
-  * tool
-  * version
-  * inputs
-* No duplicate installs
-
----
-
-# 🧪 ERROR HANDLING
-
-* Missing runtime → fail fast
-* Missing dependency → fail
-* Cyclic graph → fail
-* Script failure → propagate exit code
-
----
-
-# 🔐 SECURITY (MINIMAL BASELINE)
-
-* Script runtime must support:
-
-  * sandboxing (future)
-  * checksum validation (future)
-
----
-
-# 📦 FINAL DELIVERABLES
-
-* Fully modular codebase
-* Runtime plugin system
-* Lazy execution working
-* OCI-like store working
-* CLI fully functional
-* Example provider (kubectl)
-* Example runtime (script + oci)
-
----
-
-# 🎯 FINAL SYSTEM DEFINITION
-
-> tpx is a pluggable runtime orchestration engine that resolves tools into executable environments using a graph-based model and lazy execution semantics.
+> TPX is a workspace-centric OCI provider runtime that resolves aliases into deterministic shell environments, materializes binaries lazily, and executes commands through normal PATH-based process execution.
