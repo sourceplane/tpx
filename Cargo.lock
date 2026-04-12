@@ -250,6 +250,11 @@ dependencies = [
 [[package]]
 name = "tpx-runtime"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tpx-core",
+ "tpx-parser",
+]
 
 [[package]]
 name = "tpx-shim"
