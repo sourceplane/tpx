@@ -6,3 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+tpx-parser = { path = "../tpx-parser" }
