@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     path::{Path, PathBuf},
 };
@@ -86,6 +86,201 @@ impl WorkspaceContext {
     pub fn execution_dir(&self, cwd: &Path) -> Result<PathBuf> {
         execution_dir(cwd, &self.root)
     }
+
+    pub fn build_runtime_state(
+        &self,
+        providers: &[ProviderRuntimeState],
+    ) -> Result<WorkspaceRuntimeState> {
+        build_runtime_state(self, providers)
+    }
+
+    pub fn write_runtime_state(
+        &self,
+        providers: &[ProviderRuntimeState],
+    ) -> Result<WorkspaceRuntimeState> {
+        let runtime_state = self.build_runtime_state(providers)?;
+
+        write_runtime_state(&runtime_state)?;
+
+        Ok(runtime_state)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderRuntimeState {
+    pub alias: String,
+    pub provider_ref: String,
+    pub home: PathBuf,
+    pub binary: PathBuf,
+    pub env: BTreeMap<String, String>,
+    pub path_entries: Vec<PathBuf>,
+}
+
+impl ProviderRuntimeState {
+    pub fn new(
+        alias: impl Into<String>,
+        provider_ref: impl Into<String>,
+        home: impl Into<PathBuf>,
+        binary: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            alias: alias.into(),
+            provider_ref: provider_ref.into(),
+            home: home.into(),
+            binary: binary.into(),
+            env: BTreeMap::new(),
+            path_entries: Vec::new(),
+        }
+    }
+
+    pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env.insert(key.into(), value.into());
+
+        self
+    }
+
+    pub fn with_path_entry(mut self, path_entry: impl Into<PathBuf>) -> Self {
+        self.path_entries.push(path_entry.into());
+
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceRuntimeState {
+    pub workspace_root: PathBuf,
+    pub workspace_home: PathBuf,
+    pub env_file: PathBuf,
+    pub path_file: PathBuf,
+    pub providers: Vec<ProviderRuntimeState>,
+    pub env: BTreeMap<String, String>,
+    pub path_entries: Vec<PathBuf>,
+}
+
+pub fn build_runtime_state(
+    ctx: &WorkspaceContext,
+    providers: &[ProviderRuntimeState],
+) -> Result<WorkspaceRuntimeState> {
+    let mut providers = providers.to_vec();
+    providers.sort_by(|left, right| left.alias.cmp(&right.alias));
+
+    let mut env = BTreeMap::new();
+    let mut provider_aliases = Vec::with_capacity(providers.len());
+    let mut provider_var_aliases = BTreeSet::new();
+
+    env.insert("TPX_HOME".into(), path_to_string(&ctx.home)?);
+    env.insert("TPX_WORKSPACE_ROOT".into(), path_to_string(&ctx.root)?);
+    env.insert(
+        "TPX_WORKSPACE_HOME".into(),
+        path_to_string(&ctx.runtime_dir)?,
+    );
+    env.insert(
+        "TPX_WORKSPACE_ENV_FILE".into(),
+        path_to_string(&ctx.runtime_env_path)?,
+    );
+    env.insert(
+        "TPX_WORKSPACE_PATH_FILE".into(),
+        path_to_string(&ctx.runtime_path_path)?,
+    );
+
+    let mut path_entries = vec![ctx.runtime_bin_dir.clone()];
+
+    for provider in &providers {
+        validate_runtime_alias(&provider.alias)?;
+
+        let provider_home = normalize_provider_path(&provider.home, &provider.home)?;
+        let provider_binary = normalize_provider_path(&provider.home, &provider.binary)?;
+        let provider_var_alias = alias_env_segment(&provider.alias);
+
+        if !provider_var_aliases.insert(provider_var_alias.clone()) {
+            bail!(
+                "provider alias '{}' conflicts with another provider when normalized for environment variables",
+                provider.alias
+            );
+        }
+
+        provider_aliases.push(provider.alias.clone());
+        env.insert(
+            format!("TPX_PROVIDER_{}_REF", provider_var_alias),
+            provider.provider_ref.clone(),
+        );
+        env.insert(
+            format!("TPX_PROVIDER_{}_HOME", provider_var_alias),
+            path_to_string(&provider_home)?,
+        );
+        env.insert(
+            format!("TPX_PROVIDER_{}_BINARY", provider_var_alias),
+            path_to_string(&provider_binary)?,
+        );
+
+        for (key, value) in &provider.env {
+            if key.starts_with("TPX_") {
+                bail!(
+                    "provider alias '{}' cannot set reserved environment variable '{}'",
+                    provider.alias,
+                    key
+                );
+            }
+
+            match env.get(key) {
+                Some(existing) if existing != value => {
+                    bail!(
+                        "provider environment conflict for '{}' between values '{}' and '{}'",
+                        key,
+                        existing,
+                        value
+                    );
+                }
+                Some(_) => {}
+                None => {
+                    env.insert(key.clone(), value.clone());
+                }
+            }
+        }
+
+        for path_entry in &provider.path_entries {
+            let resolved = normalize_provider_path(&provider_home, path_entry)?;
+
+            if !path_entries.contains(&resolved) {
+                path_entries.push(resolved);
+            }
+        }
+    }
+
+    env.insert("TPX_WORKSPACE_PROVIDERS".into(), provider_aliases.join(","));
+
+    Ok(WorkspaceRuntimeState {
+        workspace_root: ctx.root.clone(),
+        workspace_home: ctx.runtime_dir.clone(),
+        env_file: ctx.runtime_env_path.clone(),
+        path_file: ctx.runtime_path_path.clone(),
+        providers,
+        env,
+        path_entries,
+    })
+}
+
+pub fn write_runtime_state(state: &WorkspaceRuntimeState) -> Result<()> {
+    fs::create_dir_all(&state.workspace_home).with_context(|| {
+        format!(
+            "failed to create workspace runtime directory {}",
+            state.workspace_home.display()
+        )
+    })?;
+    fs::write(&state.env_file, render_env_file(&state.env)?).with_context(|| {
+        format!(
+            "failed to write workspace env file {}",
+            state.env_file.display()
+        )
+    })?;
+    fs::write(&state.path_file, render_path_file(&state.path_entries)?).with_context(|| {
+        format!(
+            "failed to write workspace path file {}",
+            state.path_file.display()
+        )
+    })?;
+
+    Ok(())
 }
 
 pub fn resolve_tpx_home(home_override: Option<&Path>) -> Result<PathBuf> {
@@ -401,13 +596,90 @@ fn normalize_nonexistent_path(path: &Path) -> Result<PathBuf> {
         .join(path))
 }
 
+fn normalize_provider_path(provider_home: &Path, path: &Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+
+    Ok(provider_home.join(path))
+}
+
 fn workspace_manifest_exists(root: &Path) -> bool {
     root.join(WORKSPACE_MANIFEST_FILE).is_file()
+}
+
+fn validate_runtime_alias(alias: &str) -> Result<()> {
+    if alias.trim().is_empty() {
+        bail!("provider alias cannot be empty");
+    }
+
+    Ok(())
+}
+
+fn alias_env_segment(alias: &str) -> String {
+    alias
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn path_as_str(path: &Path) -> Result<&str> {
     path.to_str()
         .ok_or_else(|| anyhow!("path {} is not valid UTF-8", path.display()))
+}
+
+fn path_to_string(path: &Path) -> Result<String> {
+    Ok(path_as_str(path)?.to_owned())
+}
+
+fn render_env_file(env: &BTreeMap<String, String>) -> Result<String> {
+    let mut output = String::new();
+
+    for (key, value) in env {
+        if !is_valid_env_key(key) {
+            bail!("invalid environment variable name '{key}'");
+        }
+
+        output.push_str("export ");
+        output.push_str(key);
+        output.push('=');
+        output.push_str(&single_quote(value));
+        output.push('\n');
+    }
+
+    Ok(output)
+}
+
+fn render_path_file(path_entries: &[PathBuf]) -> Result<String> {
+    let mut output = String::new();
+
+    for path_entry in path_entries {
+        output.push_str(path_as_str(path_entry)?);
+        output.push('\n');
+    }
+
+    Ok(output)
+}
+
+fn is_valid_env_key(key: &str) -> bool {
+    let mut characters = key.chars();
+
+    match characters.next() {
+        Some(character) if character.is_ascii_alphabetic() || character == '_' => {}
+        _ => return false,
+    }
+
+    characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
+}
+
+fn single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 #[cfg(test)]
@@ -582,6 +854,151 @@ mod tests {
         assert_eq!(context.runtime_env_path, context.runtime_dir.join("env"));
         assert_eq!(context.runtime_path_path, context.runtime_dir.join("path"));
         assert_eq!(context.runtime_bin_dir, context.runtime_dir.join("bin"));
+    }
+
+    #[test]
+    fn builds_and_writes_runtime_state_deterministically() {
+        let temp = temp_dir("tpx-workspace-runtime-state");
+        let root = create_workspace(temp.path(), "dev", true);
+        let home = temp.path().join("home");
+        let context = load_workspace(&root, Some(&home)).expect("workspace should load");
+        let alpha_home = temp.path().join("providers/alpha");
+        let zeta_home = temp.path().join("providers/zeta");
+
+        let state = context
+            .write_runtime_state(&[
+                ProviderRuntimeState::new(
+                    "zeta",
+                    "ghcr.io/sourceplane/zeta@sha256:bbbb",
+                    &zeta_home,
+                    "bin/zeta",
+                )
+                .with_env("GAMMA", "1")
+                .with_path_entry("tools"),
+                ProviderRuntimeState::new(
+                    "alpha",
+                    "ghcr.io/sourceplane/alpha@sha256:aaaa",
+                    &alpha_home,
+                    "bin/alpha",
+                )
+                .with_env("ALPHA", "2")
+                .with_path_entry("bin")
+                .with_path_entry(alpha_home.join("extras")),
+            ])
+            .expect("runtime state should be written");
+
+        assert_eq!(
+            state.path_entries,
+            vec![
+                context.runtime_bin_dir.clone(),
+                alpha_home.join("bin"),
+                alpha_home.join("extras"),
+                zeta_home.join("tools"),
+            ]
+        );
+        assert_eq!(
+            state.env.get("TPX_WORKSPACE_PROVIDERS").map(String::as_str),
+            Some("alpha,zeta")
+        );
+        assert_eq!(
+            state
+                .env
+                .get("TPX_PROVIDER_ALPHA_BINARY")
+                .map(String::as_str),
+            Some(
+                alpha_home
+                    .join("bin/alpha")
+                    .to_str()
+                    .expect("alpha binary path should be valid UTF-8")
+            )
+        );
+        assert_eq!(
+            fs::read_to_string(&context.runtime_path_path).expect("path file should be readable"),
+            format!(
+                "{}\n{}\n{}\n{}\n",
+                context
+                    .runtime_bin_dir
+                    .to_str()
+                    .expect("runtime bin path should be valid UTF-8"),
+                alpha_home
+                    .join("bin")
+                    .to_str()
+                    .expect("alpha bin path should be valid UTF-8"),
+                alpha_home
+                    .join("extras")
+                    .to_str()
+                    .expect("alpha extras path should be valid UTF-8"),
+                zeta_home
+                    .join("tools")
+                    .to_str()
+                    .expect("zeta tools path should be valid UTF-8"),
+            )
+        );
+
+        let env_file =
+            fs::read_to_string(&context.runtime_env_path).expect("env file should be readable");
+        assert!(env_file.contains("export TPX_WORKSPACE_PROVIDERS='alpha,zeta'\n"));
+        assert!(env_file.contains("export ALPHA='2'\n"));
+        assert!(env_file.contains("export GAMMA='1'\n"));
+    }
+
+    #[test]
+    fn rejects_conflicting_provider_env_values() {
+        let temp = temp_dir("tpx-workspace-runtime-conflict");
+        let root = create_workspace(temp.path(), "dev", false);
+        let context = load_workspace(&root, Some(temp.path())).expect("workspace should load");
+        let error = context
+            .build_runtime_state(&[
+                ProviderRuntimeState::new("alpha", "alpha", temp.path().join("alpha"), "bin/a")
+                    .with_env("NODE_ENV", "dev"),
+                ProviderRuntimeState::new("beta", "beta", temp.path().join("beta"), "bin/b")
+                    .with_env("NODE_ENV", "prod"),
+            ])
+            .expect_err("conflicting provider env should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "provider environment conflict for 'NODE_ENV' between values 'dev' and 'prod'"
+        );
+    }
+
+    #[test]
+    fn rejects_reserved_provider_env_keys() {
+        let temp = temp_dir("tpx-workspace-runtime-reserved");
+        let root = create_workspace(temp.path(), "dev", false);
+        let context = load_workspace(&root, Some(temp.path())).expect("workspace should load");
+        let error = context
+            .build_runtime_state(&[ProviderRuntimeState::new(
+                "alpha",
+                "alpha",
+                temp.path().join("alpha"),
+                "bin/a",
+            )
+            .with_env("TPX_HOME", "/tmp/tpx")])
+            .expect_err("reserved provider env should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "provider alias 'alpha' cannot set reserved environment variable 'TPX_HOME'"
+        );
+    }
+
+    #[test]
+    fn rejects_alias_collisions_in_env_variable_space() {
+        let temp = temp_dir("tpx-workspace-runtime-alias-collision");
+        let root = create_workspace(temp.path(), "dev", false);
+        let context = load_workspace(&root, Some(temp.path())).expect("workspace should load");
+        let error = context
+            .build_runtime_state(&[
+                ProviderRuntimeState::new("node-tool", "one", temp.path().join("one"), "bin/a"),
+                ProviderRuntimeState::new("node_tool", "two", temp.path().join("two"), "bin/b"),
+            ])
+            .expect_err("colliding aliases should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "provider alias 'node_tool' conflicts with another provider when normalized for environment variables"
+        );
     }
 
     #[test]
