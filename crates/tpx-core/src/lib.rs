@@ -21,11 +21,13 @@ impl Context {
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
+/// Ordered batches of tools where each batch can execute in parallel.
 pub struct ExecutionPlan {
     pub steps: Vec<ExecutionStep>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
+/// A deterministic set of tools whose dependencies have already been satisfied.
 pub struct ExecutionStep {
     pub tools: Vec<String>,
 }
@@ -76,8 +78,10 @@ impl Engine {
 
 pub fn run(tool: &str, args: &[String], ctx: &Context) -> Result<i32> {
     let _ = args;
-    let _resolved_tool = resolve_tool(tool, ctx)?;
-    let _plan = build_execution_plan(tool, ctx)?;
+    let _resolved_tool = resolve_tool(tool, ctx)
+        .with_context(|| format!("failed to resolve execution target '{tool}'"))?;
+    let _plan = build_execution_plan(tool, ctx)
+        .with_context(|| format!("failed to build execution plan for '{tool}'"))?;
 
     Ok(0)
 }
@@ -352,6 +356,49 @@ mod tests {
         let error = build_execution_plan("a", &ctx).expect_err("cycles should fail");
 
         assert!(error.to_string().contains("cyclic dependency detected"));
+    }
+
+    #[test]
+    fn fails_fast_when_dependency_is_missing() {
+        let ctx = context_with_tools([("kubectl", vec!["helm"])]);
+
+        let error = build_execution_plan("kubectl", &ctx)
+            .expect_err("missing dependencies should fail during graph resolution");
+
+        assert!(error.to_string().contains("tool 'helm' was not found"));
+    }
+
+    #[test]
+    fn deduplicates_shared_dependencies_in_dependency_order() {
+        let ctx = context_with_tools([
+            ("curl", vec![]),
+            ("helm", vec!["curl"]),
+            ("kustomize", vec!["curl"]),
+            ("kubectl", vec!["helm", "kustomize"]),
+        ]);
+
+        let dependency_names = resolve_dependencies("kubectl", &ctx)
+            .expect("dependencies should resolve")
+            .into_iter()
+            .map(tool_name)
+            .collect::<Vec<_>>();
+        let plan = build_execution_plan("kubectl", &ctx).expect("plan should build");
+
+        assert_eq!(dependency_names, vec!["curl", "helm", "kustomize"]);
+        assert_eq!(
+            plan_steps(&plan),
+            vec![vec!["curl"], vec!["helm", "kustomize"], vec!["kubectl"]]
+        );
+    }
+
+    #[test]
+    fn run_validates_graph_and_returns_success() {
+        let ctx = context_with_tools([("kubectl", vec!["helm"]), ("helm", vec![])]);
+        let args = vec!["version".to_owned(), "--client".to_owned()];
+
+        let exit_code = run("kubectl", &args, &ctx).expect("valid plans should succeed");
+
+        assert_eq!(exit_code, 0);
     }
 
     fn context_with_tools<const N: usize>(entries: [(&str, Vec<&str>); N]) -> Context {
