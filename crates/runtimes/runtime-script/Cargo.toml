@@ -6,4 +6,6 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+anyhow = "1"
+sha2 = "0.10"
 tpx-runtime = { path = "../../tpx-runtime" }
