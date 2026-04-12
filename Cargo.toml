@@ -1,0 +1,21 @@
+[workspace]
+members = [
+    "crates/tpx-cli",
+    "crates/tpx-core",
+    "crates/tpx-parser",
+    "crates/tpx-runtime",
+    "crates/tpx-store",
+    "crates/tpx-shim",
+    "crates/tpx-workspace",
+    "crates/runtimes/runtime-local",
+    "crates/runtimes/runtime-script",
+    "crates/runtimes/runtime-oci",
+    "crates/tpx-tests",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
