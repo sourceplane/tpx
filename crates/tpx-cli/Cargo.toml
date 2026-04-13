@@ -5,12 +5,23 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[[bin]]
+name = "tpx"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 serde_yaml = "0.9"
+sha2 = "0.10"
+tar = "0.4"
+runtime-local = { path = "../runtimes/runtime-local" }
+runtime-oci = { path = "../runtimes/runtime-oci" }
+runtime-script = { path = "../runtimes/runtime-script" }
 tpx-core = { path = "../tpx-core" }
 tpx-parser = { path = "../tpx-parser" }
+tpx-shim = { path = "../tpx-shim" }
 tpx-runtime = { path = "../tpx-runtime" }
 tpx-workspace = { path = "../tpx-workspace" }

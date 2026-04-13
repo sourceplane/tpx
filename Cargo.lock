@@ -903,8 +903,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "reqwest",
+ "serde",
+ "serde_json",
  "sha2",
  "tar",
+ "tpx-parser",
  "tpx-runtime",
  "tpx-store",
 ]
@@ -1271,11 +1274,18 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "runtime-local",
+ "runtime-oci",
+ "runtime-script",
  "serde",
+ "serde_json",
  "serde_yaml",
+ "sha2",
+ "tar",
  "tpx-core",
  "tpx-parser",
  "tpx-runtime",
+ "tpx-shim",
  "tpx-workspace",
 ]
 
