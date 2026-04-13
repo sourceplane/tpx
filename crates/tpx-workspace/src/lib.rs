@@ -13,6 +13,7 @@ pub const HOME_CONFIG_FILE: &str = "config.yaml";
 pub const WORKSPACE_MANIFEST_FILE: &str = "tpx.yaml";
 pub const WORKSPACE_LOCK_FILE: &str = "tpx.lock";
 pub const WORKSPACE_RUNTIME_DIR: &str = ".workspace";
+pub const WORKSPACE_LAZY_DIR: &str = ".tpx";
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Workspace;
@@ -104,6 +105,29 @@ impl WorkspaceContext {
 
         Ok(runtime_state)
     }
+
+    pub fn lazy_layout(&self) -> LazyWorkspaceLayout {
+        LazyWorkspaceLayout {
+            root: self.root.join(WORKSPACE_LAZY_DIR),
+            bin_dir: self.root.join(WORKSPACE_LAZY_DIR).join("bin"),
+            env_path: self.root.join(WORKSPACE_LAZY_DIR).join("env"),
+        }
+    }
+
+    pub fn write_lazy_layout(&self) -> Result<LazyWorkspaceLayout> {
+        let layout = self.lazy_layout();
+
+        write_lazy_layout(&layout, &self.root)?;
+
+        Ok(layout)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LazyWorkspaceLayout {
+    pub root: PathBuf,
+    pub bin_dir: PathBuf,
+    pub env_path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -277,6 +301,27 @@ pub fn write_runtime_state(state: &WorkspaceRuntimeState) -> Result<()> {
         format!(
             "failed to write workspace path file {}",
             state.path_file.display()
+        )
+    })?;
+
+    Ok(())
+}
+
+pub fn write_lazy_layout(layout: &LazyWorkspaceLayout, workspace_root: &Path) -> Result<()> {
+    fs::create_dir_all(&layout.bin_dir).with_context(|| {
+        format!(
+            "failed to create lazy workspace bin directory {}",
+            layout.bin_dir.display()
+        )
+    })?;
+    fs::write(
+        &layout.env_path,
+        render_lazy_env_file(layout, workspace_root)?,
+    )
+    .with_context(|| {
+        format!(
+            "failed to write lazy workspace env file {}",
+            layout.env_path.display()
         )
     })?;
 
@@ -667,6 +712,14 @@ fn render_path_file(path_entries: &[PathBuf]) -> Result<String> {
     Ok(output)
 }
 
+fn render_lazy_env_file(layout: &LazyWorkspaceLayout, workspace_root: &Path) -> Result<String> {
+    Ok(format!(
+        "export TPX_WORKSPACE_ROOT={}\nexport PATH={}:\"$PATH\"\n",
+        single_quote(&path_to_string(workspace_root)?),
+        single_quote(&path_to_string(&layout.bin_dir)?)
+    ))
+}
+
 fn is_valid_env_key(key: &str) -> bool {
     let mut characters = key.chars();
 
@@ -940,6 +993,40 @@ mod tests {
         assert!(env_file.contains("export TPX_WORKSPACE_PROVIDERS='alpha,zeta'\n"));
         assert!(env_file.contains("export ALPHA='2'\n"));
         assert!(env_file.contains("export GAMMA='1'\n"));
+    }
+
+    #[test]
+    fn writes_lazy_workspace_layout_under_dot_tpx() {
+        let temp = temp_dir("tpx-workspace-lazy-layout");
+        let root = create_workspace(temp.path(), "dev", false);
+        let context = load_workspace(&root, Some(temp.path())).expect("workspace should load");
+
+        let layout = context
+            .write_lazy_layout()
+            .expect("lazy workspace layout should be written");
+
+        assert_eq!(layout.root, context.root.join(WORKSPACE_LAZY_DIR));
+        assert_eq!(layout.bin_dir, layout.root.join("bin"));
+        assert_eq!(layout.env_path, layout.root.join("env"));
+        assert!(layout.bin_dir.is_dir());
+        assert_eq!(
+            fs::read_to_string(&layout.env_path).expect("lazy env file should be readable"),
+            format!(
+                "export TPX_WORKSPACE_ROOT={}\nexport PATH={}:\"$PATH\"\n",
+                single_quote(
+                    context
+                        .root
+                        .to_str()
+                        .expect("workspace root should be valid UTF-8")
+                ),
+                single_quote(
+                    layout
+                        .bin_dir
+                        .to_str()
+                        .expect("lazy bin dir should be valid UTF-8")
+                )
+            )
+        );
     }
 
     #[test]
