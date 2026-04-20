@@ -1006,7 +1006,7 @@ providers:
     fn fails_on_invalid_api_version() {
         let path = write_fixture(
             "invalid-api-version",
-            r#"apiVersion: tinx.io/v1
+            r#"apiVersion: kiox.io/v1
 kind: Workspace
 workspace: dev
 providers:

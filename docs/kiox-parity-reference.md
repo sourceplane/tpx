@@ -1,10 +1,10 @@
-# TPX Reference: Reimplementing tinx in Rust
+# TPX Reference: Reimplementing kiox in Rust
 
 ## Purpose
 
-This document translates the published tinx documentation into an implementation reference for TPX.
+This document translates the published kiox documentation into an implementation reference for TPX.
 
-The target is not a generic tool orchestrator. The target is a Rust implementation of the tinx model:
+The target is not a generic tool orchestrator. The target is a Rust implementation of the kiox model:
 
 - workspace-first execution
 - OCI-native provider distribution
@@ -16,7 +16,7 @@ This document is intended to guide the next implementation stages, including wor
 
 ## Documentation Basis
 
-The analysis for this reference was derived from the tinx docs site, especially these pages:
+The analysis for this reference was derived from the kiox docs site, especially these pages:
 
 - `/`
 - `/getting-started/installation`
@@ -26,11 +26,11 @@ The analysis for this reference was derived from the tinx docs site, especially 
 - `/concepts/runtime-shell`
 - `/concepts/caching`
 - `/concepts/execution-model`
-- `/cli/tinx`
-- `/cli/tinx-install`
-- `/cli/tinx-run`
-- `/cli/tinx-workspace`
-- `/cli/tinx-provider`
+- `/cli/kiox`
+- `/cli/kiox-install`
+- `/cli/kiox-run`
+- `/cli/kiox-workspace`
+- `/cli/kiox-provider`
 - `/architecture/internals`
 - `/architecture/workspace-runtime`
 - `/architecture/provider-execution`
@@ -42,7 +42,7 @@ The analysis for this reference was derived from the tinx docs site, especially 
 
 ## Non-Negotiable Parity Rules
 
-These are the behavioral constraints that define tinx and therefore should define TPX.
+These are the behavioral constraints that define kiox and therefore should define TPX.
 
 ### 1. Workspace-first execution
 
@@ -84,22 +84,22 @@ These are the behavioral constraints that define tinx and therefore should defin
 - Missing workspaces, missing binaries, and missing commands fail early.
 - No hidden fallback to global host tools.
 
-## Concept Mapping: tinx to TPX
+## Concept Mapping: kiox to TPX
 
-| tinx concept | Meaning | TPX recommendation |
+| kiox concept | Meaning | TPX recommendation |
 | --- | --- | --- |
 | Provider | OCI-packaged tool artifact | Keep as first-class concept |
 | Alias | Workspace command name mapped to provider | Keep as first-class concept |
 | Workspace | Selected composition of providers | Keep as first-class concept |
 | Runtime shell | Generated execution environment | Keep as first-class concept |
-| tinx home | Shared cache and metadata root | Implement as `TPX_HOME` |
-| `tinx.yaml` | Manifest for `Workspace` or `Provider` | Use `tpx.yaml` with same semantics |
-| `tinx.lock` | Resolved provider lock file | Use `tpx.lock` |
+| kiox home | Shared cache and metadata root | Implement as `TPX_HOME` |
+| `kiox.yaml` | Manifest for `Workspace` or `Provider` | Use `tpx.yaml` with same semantics |
+| `kiox.lock` | Resolved provider lock file | Use `tpx.lock` |
 | `.workspace/` | Generated runtime artifacts | Prefer keeping `.workspace/` for parity |
 
 ## Canonical External Model
 
-TPX should preserve the tinx model but adopt TPX naming.
+TPX should preserve the kiox model but adopt TPX naming.
 
 ### Workspace manifest
 
@@ -164,7 +164,7 @@ spec:
 
 Required semantics:
 
-- `spec.runtime` is currently only `binary` for tinx parity.
+- `spec.runtime` is currently only `binary` for kiox parity.
 - `entrypoint` must match the executable exposed by the provider.
 - `platforms` determines build and runtime selection.
 - `env` and `path` support template expansion.
@@ -215,7 +215,7 @@ Required semantics:
 
 ## Recommended Internal Model
 
-TPX currently models generic `Tool` objects. That is useful as an internal execution primitive, but it is not the canonical tinx model.
+TPX currently models generic `Tool` objects. That is useful as an internal execution primitive, but it is not the canonical kiox model.
 
 The canonical Rust model should center on workspace aliases and provider manifests.
 
@@ -324,7 +324,7 @@ Required rules:
 
 ## Workspace Resolution and Lifecycle
 
-TPX workspace resolution must follow the same priority order as tinx.
+TPX workspace resolution must follow the same priority order as kiox.
 
 ### Resolution order
 
@@ -380,7 +380,7 @@ This guarantees workspace aliases win over host binaries.
 
 ### Runtime-generated environment variables
 
-TPX should mirror tinx with renamed prefixes:
+TPX should mirror kiox with renamed prefixes:
 
 - `TPX_HOME`
 - `TPX_WORKSPACE_ROOT`
@@ -407,7 +407,7 @@ TPX should mirror tinx with renamed prefixes:
 - `${provider_binary}`
 - `${provider_assets}`
 
-Unknown template variables should remain unchanged to match the tinx behavior described in the docs.
+Unknown template variables should remain unchanged to match the kiox behavior described in the docs.
 
 ## OCI Install, Materialization, and Hydration
 
@@ -444,7 +444,7 @@ This is essential for partial cache restores and CI resume behavior.
 
 ## CLI Parity Model
 
-TPX should move toward tinx command semantics.
+TPX should move toward kiox command semantics.
 
 ### Root commands that should exist
 
@@ -503,7 +503,7 @@ Required parity:
 
 ## CI and Deployment Guidance
 
-TPX deployment stages should preserve the CI model used by tinx.
+TPX deployment stages should preserve the CI model used by kiox.
 
 ### Non-interactive usage
 
@@ -534,11 +534,11 @@ TPX should support standard env-based auth patterns:
 
 ## Risks in the Current TPX Direction
 
-The current repository is heading toward a generic orchestration engine. That is not the same thing as tinx parity.
+The current repository is heading toward a generic orchestration engine. That is not the same thing as kiox parity.
 
 ### Risk 1: generic `Tool` model as primary public abstraction
 
-tinx is provider-and-alias centric, not tool-graph centric.
+kiox is provider-and-alias centric, not tool-graph centric.
 
 Recommendation:
 
@@ -547,7 +547,7 @@ Recommendation:
 
 ### Risk 2: runtime plugin architecture as a public contract
 
-tinx explicitly avoids a plugin framework.
+kiox explicitly avoids a plugin framework.
 
 Recommendation:
 
@@ -556,7 +556,7 @@ Recommendation:
 
 ### Risk 3: DAG-based dependency resolution as the main execution model
 
-tinx docs do not describe providers depending on each other through a DAG. They describe a merged workspace shell where providers coexist on `PATH`.
+kiox docs do not describe providers depending on each other through a DAG. They describe a merged workspace shell where providers coexist on `PATH`.
 
 Recommendation:
 
@@ -565,7 +565,7 @@ Recommendation:
 
 ### Risk 4: `.tpx/` runtime directory
 
-tinx behavior centers around `.workspace/` as rebuildable runtime state.
+kiox behavior centers around `.workspace/` as rebuildable runtime state.
 
 Recommendation:
 
@@ -613,7 +613,7 @@ Recommendation:
 
 ## Recommended Next Implementation Stages
 
-1. Realign parser and workspace manifests around tinx parity.
+1. Realign parser and workspace manifests around kiox parity.
 2. Implement `TPX_HOME` config and workspace discovery.
 3. Implement provider install and metadata store.
 4. Implement `tpx.lock` and deterministic sync.
@@ -627,4 +627,4 @@ Recommendation:
 
 TPX should stop thinking of itself primarily as a pluggable orchestration engine and start thinking of itself as a workspace-centric OCI provider runtime.
 
-That is the actual architectural center of tinx, and replicating that center is what will make the Rust port accurate.
+That is the actual architectural center of kiox, and replicating that center is what will make the Rust port accurate.
