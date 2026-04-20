@@ -1,8 +1,8 @@
-# TPX v2 - Tinx Parity Contract
+# TPX v2 - Kiox Parity Contract
 
 ## Goal
 
-Implement TPX as a Rust reimplementation of tinx.
+Implement TPX as a Rust reimplementation of kiox.
 
 The system must be:
 
@@ -12,7 +12,7 @@ The system must be:
 - deterministic in locking and shell construction
 - simple in execution: binaries on `PATH`, no RPC, no plugin protocol
 
-This contract intentionally moves TPX away from a generic orchestration engine and toward a faithful tinx-style provider runtime.
+This contract intentionally moves TPX away from a generic orchestration engine and toward a faithful kiox-style provider runtime.
 
 ## Design Principles
 
@@ -65,7 +65,7 @@ This contract intentionally moves TPX away from a generic orchestration engine a
 ### TPX home
 
 - Shared global cache and state root.
-- Equivalent of tinx home.
+- Equivalent of kiox home.
 
 ## Canonical Files and Directories
 
@@ -119,7 +119,7 @@ tpx/
 
 Important note:
 
-- `tpx-runtime` is not a public plugin framework in the tinx sense.
+- `tpx-runtime` is not a public plugin framework in the kiox sense.
 - The primary public provider runtime is `binary`.
 - Any extra runtimes are internal implementation details until parity is complete.
 
@@ -336,7 +336,7 @@ pub fn exec(command: &str, args: &[String], ctx: &WorkspaceContext) -> Result<i3
 
 The core module is not primarily a provider DAG resolver.
 
-- Provider dependencies are not the main tinx abstraction.
+- Provider dependencies are not the main kiox abstraction.
 - A graph planner may exist for future workflow features.
 - It must not replace workspace alias resolution, lock generation, or shell planning.
 
